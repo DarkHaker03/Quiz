@@ -41,19 +41,41 @@ namespace Quiz.Controllers
         }
 
         /// <summary>
-        /// Создать новую викторину
+        /// Создать или обновить викторину
         /// </summary>
-        /// <param name="createQuizDto">Данные для создания теста</param>
-        /// <returns>Созданный тест с уникальным кодом доступа</returns>
+        /// <param name="createQuizDto">Данные для создания/обновления теста</param>
+        /// <param name="quizId">Опциональный ID существующего теста для обновления</param>
+        /// <returns>Созданный или обновленный тест с уникальным кодом доступа</returns>
         /// <response code="201">Возвращает созданный тест</response>
+        /// <response code="200">Возвращает обновленный тест</response>
         /// <response code="400">Если данные некорректны</response>
+        /// <response code="404">Если тест для обновления не найден</response>
         [HttpPost]
         [ProducesResponseType(StatusCodes.Status201Created, Type = typeof(QuizDto))]
+        [ProducesResponseType(StatusCodes.Status200OK, Type = typeof(QuizDto))]
         [ProducesResponseType(StatusCodes.Status400BadRequest)]
-        public async Task<ActionResult<QuizDto>> CreateQuiz(CreateQuizDto createQuizDto)
+        [ProducesResponseType(StatusCodes.Status404NotFound)]
+        public async Task<ActionResult<QuizDto>> CreateOrUpdateQuiz(CreateQuizDto createQuizDto, [FromQuery] int? quizId = null)
         {
-            var quiz = await _quizService.CreateQuizAsync(createQuizDto);
-            return CreatedAtAction(nameof(GetQuizByAccessCode), new { accessCode = quiz.AccessCode }, quiz);
+            try
+            {
+                var quiz = await _quizService.CreateOrUpdateQuizAsync(createQuizDto, quizId);
+                
+                if (quizId.HasValue)
+                {
+                    // Если это обновление существующего теста
+                    return Ok(quiz);
+                }
+                else
+                {
+                    // Если это создание нового теста
+                    return CreatedAtAction(nameof(GetQuizByAccessCode), new { accessCode = quiz.AccessCode }, quiz);
+                }
+            }
+            catch (KeyNotFoundException)
+            {
+                return NotFound($"Тест с ID {quizId} не найден");
+            }
         }
 
         /// <summary>

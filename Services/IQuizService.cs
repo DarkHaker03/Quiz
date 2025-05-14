@@ -14,9 +14,9 @@ namespace Quiz.Services
         Task<QuizDto?> GetQuizByAccessCodeAsync(string accessCode);
 
         /// <summary>
-        /// Создать новый тест
+        /// Создать или обновить тест
         /// </summary>
-        Task<QuizDto> CreateQuizAsync(CreateQuizDto createQuizDto);
+        Task<QuizDto> CreateOrUpdateQuizAsync(CreateQuizDto createQuizDto, int? quizId = null);
 
         /// <summary>
         /// Сохранить ответ пользователя

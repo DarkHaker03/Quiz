@@ -6,7 +6,7 @@ using Quiz.Models.DTOs;
 namespace Quiz.Services
 {
     /// <summary>
-    /// Сервис для работы с тестами
+    /// Реализация сервиса для работы с тестами
     /// </summary>
     public class QuizService : IQuizService
     {
@@ -61,35 +61,118 @@ namespace Quiz.Services
         }
 
         /// <inheritdoc />
-        public async Task<QuizDto> CreateQuizAsync(CreateQuizDto createQuizDto)
+        public async Task<QuizDto> CreateOrUpdateQuizAsync(CreateQuizDto createQuizDto, int? quizId = null)
         {
-            // Генерация уникального кода доступа
-            string accessCode = await GenerateUniqueAccessCode();
+            Models.Quiz quiz;
 
-            var quiz = new Models.Quiz
+            if (quizId.HasValue)
             {
-                Title = createQuizDto.Title,
-                Description = createQuizDto.Description,
-                AccessCode = accessCode,
-                CreatedAt = DateTime.UtcNow,
-                Questions = createQuizDto.Questions.Select((q, index) => new Question
-                {
-                    Text = q.Text,
-                    Type = q.Type,
-                    Order = q.Order > 0 ? q.Order : index + 1,
-                    CorrectTextAnswer = q.CorrectTextAnswer,
-                    Answers = q.Type == QuestionType.MultipleChoice && q.Answers != null
-                        ? q.Answers.Select((a, i) => new Answer
-                        {
-                            Text = a.Text,
-                            IsCorrect = a.IsCorrect,
-                            Order = a.Order > 0 ? a.Order : i + 1
-                        }).ToList()
-                        : new List<Answer>()
-                }).ToList()
-            };
+                // Обновление существующего теста
+                quiz = await _context.Quizzes
+                    .Include(q => q.Questions)
+                    .ThenInclude(q => q.Answers)
+                    .FirstOrDefaultAsync(q => q.Id == quizId.Value);
 
-            _context.Quizzes.Add(quiz);
+                if (quiz == null)
+                {
+                    throw new KeyNotFoundException($"Тест с ID {quizId.Value} не найден");
+                }
+
+                // Обновляем основные поля теста
+                quiz.Title = createQuizDto.Title;
+                quiz.Description = createQuizDto.Description;
+
+                // Получение всех существующих вопросов для последующей работы
+                var existingQuestions = quiz.Questions.ToList();
+                
+                // Обновляем вопросы
+                quiz.Questions.Clear();
+                
+                for (int i = 0; i < createQuizDto.Questions.Count; i++)
+                {
+                    var questionDto = createQuizDto.Questions[i];
+                    Question question;
+                    
+                    // Поскольку CreateQuestionDto не имеет свойства Id, мы не можем определить
+                    // какие вопросы обновлять. Создаем новые вопросы для каждого элемента в списке.
+                    question = new Question
+                    {
+                        Text = questionDto.Text,
+                        Type = questionDto.Type,
+                        Order = questionDto.Order > 0 ? questionDto.Order : i + 1,
+                        CorrectTextAnswer = questionDto.CorrectTextAnswer,
+                        Answers = new List<Answer>()
+                    };
+                    
+                    // Добавляем ответы для вопросов с множественным выбором
+                    if (questionDto.Type == QuestionType.MultipleChoice && questionDto.Answers != null)
+                    {
+                        foreach (var answerDto in questionDto.Answers)
+                        {
+                            question.Answers.Add(new Answer
+                            {
+                                Text = answerDto.Text,
+                                IsCorrect = answerDto.IsCorrect,
+                                Order = answerDto.Order > 0 ? answerDto.Order : 0
+                            });
+                        }
+                    }
+                    
+                    quiz.Questions.Add(question);
+                }
+                
+                // Удаляем вопросы, которые были в базе данных
+                foreach (var questionToRemove in existingQuestions)
+                {
+                    _context.Questions.Remove(questionToRemove);
+                }
+            }
+            else
+            {
+                // Создание нового теста
+                quiz = new Models.Quiz
+                {
+                    Title = createQuizDto.Title,
+                    Description = createQuizDto.Description,
+                    CreatedAt = DateTime.UtcNow,
+                    AccessCode = GenerateAccessCode(),
+                    Questions = new List<Question>()
+                };
+                
+                // Добавляем вопросы
+                for (int i = 0; i < createQuizDto.Questions.Count; i++)
+                {
+                    var questionDto = createQuizDto.Questions[i];
+                    var question = new Question
+                    {
+                        Text = questionDto.Text,
+                        Type = questionDto.Type,
+                        Order = questionDto.Order > 0 ? questionDto.Order : i + 1,
+                        CorrectTextAnswer = questionDto.CorrectTextAnswer,
+                        Answers = new List<Answer>()
+                    };
+                    
+                    // Добавляем ответы для вопросов с множественным выбором
+                    if (questionDto.Type == QuestionType.MultipleChoice && questionDto.Answers != null)
+                    {
+                        for (int j = 0; j < questionDto.Answers.Count; j++)
+                        {
+                            var answerDto = questionDto.Answers[j];
+                            question.Answers.Add(new Answer
+                            {
+                                Text = answerDto.Text,
+                                IsCorrect = answerDto.IsCorrect,
+                                Order = answerDto.Order > 0 ? answerDto.Order : j + 1
+                            });
+                        }
+                    }
+                    
+                    quiz.Questions.Add(question);
+                }
+
+                _context.Quizzes.Add(quiz);
+            }
+
             await _context.SaveChangesAsync();
 
             return new QuizDto
@@ -142,6 +225,8 @@ namespace Quiz.Services
             }
 
             // Получаем тест и ответы пользователя
+            var userAnswers = await _sessionService.GetUserAnswersAsync(accessCode, userId);
+
             var quiz = await _context.Quizzes
                 .Include(q => q.Questions)
                 .ThenInclude(q => q.Answers)
@@ -153,103 +238,107 @@ namespace Quiz.Services
                 throw new KeyNotFoundException("Тест не найден");
             }
 
-            var userAnswers = await _sessionService.GetUserAnswersAsync(accessCode, userId);
+            // Рассчитываем результаты
+            var result = CalculateResults(quiz, userAnswers);
 
-            // Формируем результаты
-            var result = new QuizResultDto
-            {
-                Id = quiz.Id,
-                Title = quiz.Title,
-                TotalQuestions = quiz.Questions.Count,
-                CorrectAnswers = 0,
-                Questions = new List<QuestionResultDto>()
-            };
-
-            foreach (var question in quiz.Questions.OrderBy(q => q.Order))
-            {
-                var userAnswer = userAnswers.FirstOrDefault(a => a.QuestionId == question.Id);
-                bool isCorrect = false;
-                string? userAnswerText = null;
-
-                if (question.Type == QuestionType.MultipleChoice)
-                {
-                    var selectedAnswers = userAnswer?.SelectedAnswerIds ?? new List<int>();
-                    var correctAnswers = question.Answers.Where(a => a.IsCorrect).Select(a => a.Id).ToList();
-
-                    // Проверка правильности ответов на вопрос с выбором
-                    isCorrect = selectedAnswers.Count > 0 &&
-                                correctAnswers.Count == selectedAnswers.Count &&
-                                correctAnswers.All(selectedAnswers.Contains);
-
-                    var answerResults = question.Answers.OrderBy(a => a.Order).Select(a => new AnswerResultDto
-                    {
-                        Id = a.Id,
-                        Text = a.Text,
-                        IsCorrect = a.IsCorrect,
-                        IsSelected = selectedAnswers.Contains(a.Id)
-                    }).ToList();
-
-                    result.Questions.Add(new QuestionResultDto
-                    {
-                        Id = question.Id,
-                        Text = question.Text,
-                        Type = question.Type,
-                        Answers = answerResults,
-                        IsCorrect = isCorrect
-                    });
-                }
-                else // FreeText
-                {
-                    userAnswerText = userAnswer?.TextAnswer;
-
-                    // Для текстового вопроса проверяем совпадение с правильным ответом
-                    isCorrect = !string.IsNullOrEmpty(userAnswerText) &&
-                                !string.IsNullOrEmpty(question.CorrectTextAnswer) &&
-                                userAnswerText.Trim().Equals(question.CorrectTextAnswer.Trim(),
-                                    StringComparison.OrdinalIgnoreCase);
-
-                    result.Questions.Add(new QuestionResultDto
-                    {
-                        Id = question.Id,
-                        Text = question.Text,
-                        Type = question.Type,
-                        UserAnswer = userAnswerText,
-                        CorrectTextAnswer = question.CorrectTextAnswer,
-                        IsCorrect = isCorrect
-                    });
-                }
-
-                if (isCorrect)
-                {
-                    result.CorrectAnswers++;
-                }
-            }
-
-            // Сохраняем результаты
+            // Сохраняем результаты в БД
             await _sessionService.CompleteSessionAsync(accessCode, userId, result);
 
             return result;
         }
 
         /// <summary>
-        /// Генерирует уникальный код доступа для викторины
+        /// Вычисление результатов теста
         /// </summary>
-        private async Task<string> GenerateUniqueAccessCode()
+        private QuizResultDto CalculateResults(Models.Quiz quiz, List<QuestionAnswerDto> userAnswers)
         {
-            // Случайный код из 8 символов (буквы и цифры)
+            var result = new QuizResultDto
+            {
+                Id = quiz.Id,
+                Title = quiz.Title,
+                Questions = new List<QuestionResultDto>(),
+                TotalQuestions = quiz.Questions.Count,
+                CorrectAnswers = 0
+            };
+
+            foreach (var question in quiz.Questions)
+            {
+                var userAnswer = userAnswers.FirstOrDefault(a => a.QuestionId == question.Id);
+                var questionResult = new QuestionResultDto
+                {
+                    Id = question.Id,
+                    Text = question.Text,
+                    Type = question.Type,
+                    IsCorrect = false,
+                    UserAnswer = userAnswer?.TextAnswer,
+                    CorrectTextAnswer = question.Type == QuestionType.FreeText
+                        ? question.CorrectTextAnswer
+                        : null
+                };
+
+                if (question.Type == QuestionType.MultipleChoice)
+                {
+                    questionResult.Answers = question.Answers.Select(a => new AnswerResultDto
+                    {
+                        Id = a.Id,
+                        Text = a.Text,
+                        IsCorrect = a.IsCorrect,
+                        IsSelected = userAnswer?.SelectedAnswerIds?.Contains(a.Id) ?? false
+                    }).ToList();
+                }
+
+                // Проверяем правильность ответа
+                if (userAnswer != null)
+                {
+                    if (question.Type == QuestionType.MultipleChoice)
+                    {
+                        var correctAnswerIds = question.Answers
+                            .Where(a => a.IsCorrect)
+                            .Select(a => a.Id)
+                            .ToList();
+
+                        var selectedAnswerIds = userAnswer.SelectedAnswerIds ?? new List<int>();
+
+                        // Проверяем, что все правильные ответы выбраны и нет выбранных неправильных
+                        questionResult.IsCorrect = correctAnswerIds.Count == selectedAnswerIds.Count &&
+                                                  correctAnswerIds.All(selectedAnswerIds.Contains);
+                    }
+                    else if (question.Type == QuestionType.FreeText)
+                    {
+                        // Для текстовых вопросов сравниваем ответы без учета регистра
+                        questionResult.IsCorrect = !string.IsNullOrEmpty(userAnswer.TextAnswer) &&
+                                                 !string.IsNullOrEmpty(question.CorrectTextAnswer) &&
+                                                 userAnswer.TextAnswer.Trim().Equals(
+                                                     question.CorrectTextAnswer.Trim(),
+                                                     StringComparison.OrdinalIgnoreCase);
+                    }
+
+                    if (questionResult.IsCorrect)
+                    {
+                        result.CorrectAnswers++;
+                    }
+                }
+
+                result.Questions.Add(questionResult);
+            }
+
+            return result;
+        }
+
+        /// <summary>
+        /// Генерация уникального кода доступа
+        /// </summary>
+        private string GenerateAccessCode()
+        {
             const string chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
             var random = new Random();
             string code;
-            bool isUnique = false;
 
-            // Проверяем на уникальность
             do
             {
                 code = new string(Enumerable.Repeat(chars, 8)
                     .Select(s => s[random.Next(s.Length)]).ToArray());
-
-                isUnique = !await _context.Quizzes.AnyAsync(q => q.AccessCode == code);
-            } while (!isUnique);
+            } while (_context.Quizzes.Any(q => q.AccessCode == code));
 
             return code;
         }
